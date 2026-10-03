@@ -18,7 +18,7 @@ h2,h3 {letter-spacing:-.035em}
 [data-testid="stMetric"] {padding:14px 18px;background:white;border:1px solid #dde5df;border-radius:12px}
 [data-testid="stMetricLabel"] {color:#557167}
 [data-testid="stMetricValue"] {font-size:1.8rem}
-.compass-brand {font-weight:800;letter-spacing:-.03em;font-size:1.25rem;color:#13795b}
+.compass-brand {font-weight:800;letter-spacing:-.03em;font-size:1.5rem;color:#13795b}
 .intro {color:#557167;font-size:1.08rem;max-width:760px;margin:0 0 24px}
 .feature {background:#e7f1eb;border-left:4px solid #13795b;padding:20px 24px;border-radius:0 12px 12px 0;margin:14px 0 24px}
 .feature strong {font-size:1.2rem;color:#164c38}
@@ -28,7 +28,8 @@ h2,h3 {letter-spacing:-.035em}
 </style>''', unsafe_allow_html=True)
 
 @st.cache_data
-def load_data():
+def load_data(ratio_schema):
+    # Include ratio definitions in the cache key when the library changes.
     return prepare_data(ROOT / 'data' / 'tadawul_merged.csv')
 
 @st.cache_data
@@ -39,8 +40,9 @@ def calculate(panel, weights, benchmark, robust):
 def use_preset():
     preset = PRESETS[st.session_state['preset']]
     total = sum(preset.values())
+    st.session_state['selected_ratios'] = [k for k in RATIOS if preset.get(k, 0) > 0]
     for key in RATIOS:
-        st.session_state['weight_' + key] = int(round(100 * preset[key] / total))
+        st.session_state['weight_' + key] = int(round(100 * preset.get(key, 0) / total))
 
 
 def csv_bytes(df):
@@ -67,10 +69,10 @@ def chart_style(chart):
 
 
 def ratio_format(key):
-    return '.2f' if key == 'current_ratio' else '.1%'
+    return '.2f' if key in ['current_ratio', 'cash_ratio', 'cash_to_income', 'debt_to_equity', 'asset_turnover', 'eps'] else '.1%'
 
 try:
-    panel, audit = load_data()
+    panel, audit = load_data(tuple((key, meta['formula']) for key, meta in RATIOS.items()))
 except (OSError, ValueError) as error:
     st.error(f'Could not load the project dataset: {error}')
     st.stop()
@@ -86,8 +88,10 @@ with st.sidebar:
     st.divider()
     st.subheader('Your definition of quality')
     st.selectbox('Starting strategy', list(PRESETS), key='preset', on_change=use_preset)
-    weights = {}
-    for key, meta in RATIOS.items():
+    selected_ratios = st.multiselect('Ratio library', list(RATIOS), default=[k for k, v in DEFAULT_WEIGHTS.items() if v > 0], key='selected_ratios', format_func=lambda k: RATIOS[k]['label'], help='Choose ratios, then assign their weights. Unselected ratios have zero weight.')
+    weights = {k: 0 for k in RATIOS}
+    for key in selected_ratios:
+        meta = RATIOS[key]
         if 'weight_' + key not in st.session_state:
             st.session_state['weight_' + key] = meta['weight']
         weights[key] = st.slider(meta['label'], 0, 100, key='weight_' + key, help=meta['why'])
@@ -95,7 +99,7 @@ with st.sidebar:
     st.caption(f'Slider total: {total}. Effective weights automatically sum to 100%.')
     if total:
         st.caption(' · '.join(f"{RATIOS[k]['label']}: {v/total:.0%}" for k,v in weights.items() if v))
-    st.button('Reset balanced weights', on_click=lambda: st.session_state.update({'preset': 'Balanced quality', **{'weight_' + k:v for k,v in DEFAULT_WEIGHTS.items()}}), width='stretch')
+    st.button('Reset default ratios & weights', on_click=lambda: st.session_state.update({'preset': 'Default quality', 'selected_ratios': [k for k,v in DEFAULT_WEIGHTS.items() if v > 0], **{'weight_' + k:v for k,v in DEFAULT_WEIGHTS.items()}}), width='stretch')
     st.divider()
     st.caption('Higher score = stronger fundamentals under your selected priorities. Scores are relative, not expected returns.')
 
@@ -119,7 +123,6 @@ metrics[0].metric('Firms in this year', f'{len(current):,}')
 metrics[1].metric('Firms with scores', f'{current.score.notna().sum():,}')
 metrics[2].metric('Median data coverage', f'{current.coverage.median():.0%}')
 metrics[3].metric('Years covered', f'{min(years)}–{max(years)}')
-st.caption(f"Complete dataset: {audit['firms']} firms · {audit['retained_rows']:,} unique reported firm-years. Ties share ranks; records with no usable weighted ratios stay visible and unranked.")
 
 leader = current[current.status.eq('Scored')].head(1)
 if not leader.empty:
@@ -180,7 +183,7 @@ with company_tab:
         st.caption(f'{r.profile_sector} · {r.profile_industry} · {r.status} · report end: {r.get("period_end_date", "unknown")}')
         if r.negative_equity:
             st.warning('Nonpositive equity: investigate financial distress. ROE is not used in the score because its denominator would be misleading.')
-        components = pd.DataFrame([{'Ratio':m['label'], 'Raw ratio':r[k], 'Direction-adjusted z':r[k+'_z'], 'Effective weight':r[k+'_effective_weight'], 'Contribution':r[k+'_contribution']} for k,m in RATIOS.items()])
+        components = pd.DataFrame([{'Ratio':m['label'], 'Raw ratio':r[k], 'Direction-adjusted z':r[k+'_z'], 'Effective weight':r[k+'_effective_weight'], 'Contribution':r[k+'_contribution']} for k,m in RATIOS.items() if weights[k] > 0])
         st.dataframe(components, hide_index=True, width='stretch', column_config={'Raw ratio':st.column_config.NumberColumn(format='%.4f'), 'Effective weight':st.column_config.NumberColumn(format='percent'),'Contribution':st.column_config.NumberColumn(format='%.3f')})
         st.caption('Positive contributions help; negative contributions hurt. Missing ratios contribute zero and reduce coverage. Finance current-ratio weight is redistributed across the other active ratios.')
         st.subheader('Peers of a similar size')
@@ -195,9 +198,8 @@ with company_tab:
             st.caption('Peer ROA and margin ranks are computed independently in this same-year size band; the composite score still uses the selected broader benchmark.')
         else:
             st.info('A positive revenue value is required to form a size-matched peer group.')
-    default_peers = ['3030','3040','3080'] if ticker == '3020' else []
-    compare = st.multiselect('Add companies to the history chart (up to 3)', [t for t in tickers if t!=ticker], default=[t for t in default_peers if t in tickers], max_selections=3, format_func=lambda t:f'{t} · {choices[t]}')
-    metric = st.selectbox('History metric', ['standing', 'rank'] + list(RATIOS), format_func=lambda k: {'standing':'Market standing (0–100, higher is better)','rank':'Year rank (1 is best)'}.get(k,RATIOS.get(k,{}).get('label',k)))
+    compare = st.multiselect('Add companies to the history chart (up to 3)', [t for t in tickers if t!=ticker], default=[], max_selections=3, format_func=lambda t:f'{t} · {choices[t]}')
+    metric = st.selectbox('History metric', ['standing', 'rank'] + selected_ratios, format_func=lambda k: {'standing':'Market standing (0–100, higher is better)','rank':'Year rank (1 is best)'}.get(k,RATIOS.get(k,{}).get('label',k)))
     trend = scored[scored.ticker.isin([ticker] + compare)].sort_values(['ticker','fiscal_year'])
     # Expand years so lines cannot bridge missing reports or missing ratios.
     trend_grid = pd.MultiIndex.from_product([[ticker]+compare, years], names=['ticker','fiscal_year']).to_frame(index=False)
@@ -215,14 +217,14 @@ with company_tab:
 
 with lab_tab:
     st.subheader('What changes when your priorities change?')
-    st.write('Your live sliders are compared with the balanced strategy, using the same benchmark and outlier setting.')
+    st.write('Your live sliders are compared with the default strategy, using the same benchmark and outlier setting.')
     changed = current[current.strategy_rank_gain.notna()].copy()
     if changed.empty:
         st.info('No comparable ranks for this strategy.')
     else:
         gainers = changed.sort_values('strategy_rank_gain',ascending=False).head(10)
         st.dataframe(gainers[['ticker','profile_name','rank','strategy_rank_gain','coverage','status']], hide_index=True, width='stretch')
-        st.caption('Positive gain means the firm moved up versus balanced weights. This measures strategy sensitivity, not a change in company performance.')
+        st.caption('Positive gain means the firm moved up versus default weights. This measures strategy sensitivity, not a change in company performance.')
         st.metric('Companies whose ranks changed', f'{changed.strategy_rank_gain.ne(0).sum():,} / {len(changed):,}')
     st.subheader('Year-over-year movers')
     movers = current[current.status.eq('Scored') & current.standing_change.notna()].sort_values('standing_change',ascending=False)
@@ -233,12 +235,13 @@ with lab_tab:
         st.caption('Movers are matched to the immediately preceding year. Standing changes use percentage points to account for different universe sizes.')
     st.subheader('Do the ratios repeat the same information?')
     st.caption('Pearson correlation of raw ratios in the selected year. Finance current ratios are excluded. Hover for pairwise sample size; correlation does not prove causation.')
-    corr_data = current[list(RATIOS)].copy()
-    corr_data.loc[current.profile_sector.eq('Finance'),'current_ratio'] = np.nan
+    corr_data = current[selected_ratios].copy()
+    if 'current_ratio' in corr_data:
+        corr_data.loc[current.profile_sector.eq('Finance'),'current_ratio'] = np.nan
     corr = corr_data.corr(min_periods=3)
     corr_rows = []
-    for a in RATIOS:
-        for b in RATIOS:
+    for a in selected_ratios:
+        for b in selected_ratios:
             corr_rows.append({'Ratio A':RATIOS[a]['label'],'Ratio B':RATIOS[b]['label'],'Correlation':corr.loc[a,b], 'Pairs':int(corr_data[[a,b]].notna().all(axis=1).sum())})
     heat = alt.Chart(pd.DataFrame(corr_rows)).mark_rect().encode(
         x=alt.X('Ratio A:N',title=None,axis=alt.Axis(labelAngle=-35)),y=alt.Y('Ratio B:N',title=None),
@@ -246,46 +249,17 @@ with lab_tab:
     st.altair_chart(chart_style(heat), use_container_width=True)
 
 with method_tab:
-    st.subheader('The question this score answers')
-    st.write('Which firms combine profitability, expansion, manageable obligations, and cash generation under our chosen priorities? The score screens historical financial quality; it does not estimate valuation or stock returns.')
-    st.subheader('Six ratios. One explainable score.')
-    for key, meta in RATIOS.items():
-        with st.expander(f"{meta['label']} · default {meta['weight']}%"):
-            st.write('**Formula:** ' + meta['formula'])
-            st.write('**Why this ratio:** ' + meta['why'])
-            st.write('**Why this weight:** ' + meta['weight_why'])
-            st.caption(f"Current normalized slider allocation: {weights[key]/total:.1%}")
-    st.info('The weights are team judgments, not statistically optimized or validated investment allocations. Profitability receives 45%, growth 20%, balance-sheet checks 25%, and operating cash generation 10%.')
-    st.markdown('''**How scoring works**
-
-1. Keep one most-complete source record per ticker and fiscal year. Break ties by latest period end, then source order. Preserve missing-period records and flag them.
-2. Use only positive denominators. Keep losses as negative numerators. Growth uses consecutive years within the same firm, with no forward filling.
-3. For each year and selected benchmark, cap the current-ratio scoring input at 3×. Optionally clip 5th–95th percentile tails in groups with at least 10 valid values.
-4. Calculate `z = (ratio − group mean) / population standard deviation`. Constant or singleton groups receive neutral zero z-scores. Missing values remain missing in the ratio table.
-5. Reverse the sign for liabilities/assets. Normalize sliders to sum to 100%. Exclude current ratio for Finance and redistribute its weight among active ratios.
-6. Add weighted z-scores. Missing ratios contribute neutral zero **without** reallocating their weights; weighted coverage makes that uncertainty visible. Below 70% coverage or unknown period type is provisional. Zero coverage stays unranked.
-7. Rank separately in every year, highest score first. Equal scores share the minimum rank. Also compute sector ranks and consecutive-year movements.
-''')
-    st.caption('ROA uses year-end assets to match the course definition; it is not average-assets ROA. Sector labels come from profile metadata and may not reflect historical classification. Sparse sectors provide weak comparisons; see valid observations below.')
-    st.subheader('Data audit')
-    st.json(audit, expanded=True)
-    counts = current.groupby('profile_sector').agg(Firms=('ticker','size'), Scored=('score','count'))
-    for k,m in RATIOS.items():
-        counts[m['label'] + ' valid'] = current.groupby('profile_sector')[k + '_peer_n'].first()
-    st.dataframe(counts,width='stretch')
-    st.caption('Counts correspond to the selected benchmark. Whole-market mode therefore repeats market-wide ratio counts for each displayed sector.')
-    with st.expander('Inspect duplicate-resolution decisions'):
-        duplicate_rows = panel[panel.source_records.gt(1)]
-        st.dataframe(duplicate_rows[['ticker','profile_name','fiscal_year','period_end_date','source_records','available_ratios']],hide_index=True,width='stretch')
-        st.caption('These may be fiscal-year-end changes, not identical copies. Retained records should be reviewed against original annual reports for production research.')
-    st.subheader('What is deliberately left out?')
-    st.write('ROE and liabilities/equity can become misleading with small or negative equity. Gross and operating margins have weaker availability for financial institutions. P/E needs stock prices not supplied here. We keep the scoring model short and display raw ratios and coverage for review.')
-    st.write('Finance firms are still included, but a broad Finance sector mixes banks, insurers and investment firms. This generic score cannot replace bank capital, asset-quality or insurer-specific analysis. Use the industry and size peer view before drawing conclusions.')
-    st.subheader('Course connection')
-    st.write('Day 1: data audit and groupby. Day 2: firm-year panel, financial ratios and growth. Day 3: peer comparisons, correlations and multi-year charts. Day 4: z-scores, weighted ranking, interactive sliders and a capstone pitch.')
-    st.markdown('Ratio categories and comparison limits: [CFA Institute, Financial Analysis Techniques](https://www.cfainstitute.org/insights/professional-learning/refresher-readings/2026/financial-analysis-techniques). Finance-specific limitations: [CFA Institute, Analysis of Financial Institutions](https://www.cfainstitute.org/insights/professional-learning/refresher-readings/2026/analysis-of-financial-institutions). These sources support the financial concepts; the weights and scoring policies are our project choices.')
-    settings = {'weights':weights,'normalized_weights':{k:v/total for k,v in weights.items()},'benchmark':benchmark,'winsorize_5_95':robust,'year':year,'missing_policy':'neutral z=0; flag weighted coverage <70%; zero coverage unranked','finance_policy':'exclude current ratio and renormalize remaining active weights'}
-    st.download_button('Download current strategy settings',json.dumps(settings,indent=2),'strategy_settings.json','application/json')
+    st.subheader('Method & data')
+    st.write('Compare historical financial quality using your selected ratios. Default weights: ROA 30%, operating cash flow / net income 30%, revenue growth 25%, and liabilities / assets 15%.')
+    st.markdown('**Score:** ratios are standardized within each year and benchmark, then combined using normalized weights. Lower leverage is rewarded. Optional outlier clipping reduces extreme values.')
+    st.caption('Missing ratios contribute zero and reduce weighted coverage. Below 70% coverage or an unknown reporting period is provisional. Current ratio is excluded for Finance. Cash flow / net income requires positive net income. Scores do not measure valuation or predict returns.')
+    with st.expander('Ratio library & formulas'):
+        st.dataframe(pd.DataFrame([{'Ratio': m['label'], 'Formula': m['formula'], 'Preferred': 'Lower' if m['direction'] < 0 else 'Higher', 'Default weight': f"{m['weight']}%"} for m in RATIOS.values()]), hide_index=True, width='stretch')
+        st.caption('Includes the class slides and supplied Colab ratios. Course debt/assets is represented by liabilities/assets. CAGR uses a fixed three-year window. Small or negative denominators can limit interpretation; nonpositive denominators are excluded.')
+    with st.expander('Data summary'):
+        st.write(f"{audit['firms']} companies · {audit['retained_rows']:,} reported company-years · {min(audit['years'])}–{max(audit['years'])}. One most-complete record is kept per company/year; missing reports remain unranked. 2026 is partial.")
+    settings = {'weights': weights, 'selected_ratios': selected_ratios, 'normalized_weights': {k: v/total for k,v in weights.items()}, 'benchmark': benchmark, 'winsorize_5_95': robust, 'year': year}
+    st.download_button('Download current strategy settings', json.dumps(settings, indent=2), 'strategy_settings.json', 'application/json')
 
 st.divider()
-st.caption('Tadawul Compass · Group 5 · Built from the supplied course dataset. Scores describe historical relative fundamentals under explicit assumptions.')
+st.markdown('<div style="font-size:0.875rem;font-weight:400;font-family:inherit;white-space:nowrap;overflow-x:auto;">Tadawul Compass · Group 5 · Reem Alamoudi · Razan Alsadhan · Abdulmalik Alsuwailem · Naif Alsofyani · Mohammed Abukhalid</div>', unsafe_allow_html=True)
