@@ -54,11 +54,12 @@ def show_table(df, extra=None):
     if extra:
         cols += extra
     config = {
-        'rank': st.column_config.NumberColumn('Year rank', format='%d'),
+        'rank': st.column_config.NumberColumn(f'Rank in {year}', format='%d'),
         'ticker': 'Ticker', 'profile_name': 'Company', 'profile_sector': 'Sector',
         'score': st.column_config.NumberColumn('Quality score (z)', format='%.3f'),
         'coverage': st.column_config.NumberColumn('Weighted coverage', format='percent'),
-        'status': 'Data status', 'sector_rank': 'Sector rank', 'rank_change': 'Rank gain vs prior year',
+        'status': 'Data status', 'sector_rank': 'Sector rank',
+        'previous_rank': st.column_config.NumberColumn(f'Rank in {year - 1}', format='%d'),
         'standing_change': st.column_config.NumberColumn('Standing change (pp)', format='%.1f'),
     }
     st.dataframe(df[cols], column_config=config, hide_index=True, width='stretch', height=430)
@@ -113,7 +114,8 @@ scored = calculate(panel, weights, benchmark, robust)
 baseline = calculate(panel, DEFAULT_WEIGHTS, benchmark, robust)
 current = scored[scored.fiscal_year.eq(year)].copy()
 baseline_ranks = baseline[baseline.fiscal_year.eq(year)].set_index('ticker')['rank']
-current['strategy_rank_gain'] = current.ticker.map(baseline_ranks) - current['rank']
+current['default_strategy_rank'] = current.ticker.map(baseline_ranks)
+current['strategy_rank_gain'] = current.default_strategy_rank - current['rank']
 if year == 2026:
     st.warning('2026 is a partial reporting universe: only 8 source records, including 2 with unknown period type. Its ranks are not representative of the full market.')
 if benchmark == 'Whole market':
@@ -149,7 +151,7 @@ with ranking_tab:
     if view.empty:
         st.info('No companies match these filters.')
     else:
-        show_table(view, ['sector_rank', 'rank_change'])
+        show_table(view, ['sector_rank', 'previous_rank'])
         top = view[view.status.eq('Scored')].head(10)
         if not top.empty:
             st.subheader('Leading companies with adequate coverage')
@@ -223,16 +225,21 @@ with lab_tab:
         st.info('No comparable ranks for this strategy.')
     else:
         gainers = changed.sort_values('strategy_rank_gain',ascending=False).head(10)
-        st.dataframe(gainers[['ticker','profile_name','rank','strategy_rank_gain','coverage','status']], hide_index=True, width='stretch')
-        st.caption('Positive gain means the firm moved up versus default weights. This measures strategy sensitivity, not a change in company performance.')
+        st.dataframe(gainers[['ticker','profile_name','rank','default_strategy_rank','coverage','status']], hide_index=True, width='stretch', column_config={
+            'ticker': 'Ticker', 'profile_name': 'Company',
+            'rank': st.column_config.NumberColumn(f'Current strategy rank ({year})', format='%d'),
+            'default_strategy_rank': st.column_config.NumberColumn(f'Default strategy rank ({year})', format='%d'),
+            'coverage': st.column_config.NumberColumn('Weighted coverage', format='percent'), 'status': 'Data status',
+        })
+        st.caption('Compare the two ranks directly: a lower number is better. Both strategies use the same year; only ratio weights and selection differ. Rows show the largest improvements versus the default strategy.')
         st.metric('Companies whose ranks changed', f'{changed.strategy_rank_gain.ne(0).sum():,} / {len(changed):,}')
     st.subheader('Year-over-year movers')
     movers = current[current.status.eq('Scored') & current.standing_change.notna()].sort_values('standing_change',ascending=False)
     if movers.empty:
         st.info('No consecutive-year comparisons are available.')
     else:
-        show_table(movers.head(10), ['standing_change', 'rank_change'])
-        st.caption('Movers are matched to the immediately preceding year. Standing changes use percentage points to account for different universe sizes.')
+        show_table(movers.head(10), ['previous_rank', 'standing_change'])
+        st.caption(f'Compare rank in {year} with rank in {year - 1}: a lower number is better. Both years use your current strategy. Rows show the largest standing improvements; standing changes use percentage points to account for different universe sizes.')
     st.subheader('Do the ratios repeat the same information?')
     st.caption('Pearson correlation of raw ratios in the selected year. Finance current ratios are excluded. Hover for pairwise sample size; correlation does not prove causation.')
     corr_data = current[selected_ratios].copy()
